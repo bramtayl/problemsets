@@ -1,0 +1,29 @@
+commute_binary.csv variables
+id: individual identifier
+mode: chosen commute mode
+time.car: time (in minutes) to drive to campus
+cost.car: cost (in dollars) to drive to campus
+time.bus: time (in minutes) to ride the bus to campus
+cost.bus: cost (in dollars) to ride the bus to campus
+price_gas: gasoline price ($ per gallon)
+snowfall: snowfall (in inches) over previous 24 hours
+construction: binary indicator (0 or 1) for road construction on route
+bus_detour: binary indicator (0 or 1) if bus is on a detour
+age: age (in years)
+income: annual income (in 1000 dollars)
+marital_status: marital status, either "single" or "married"
+
+commute_multinomial.csv variables
+id: individual identifier
+mode: chosen commute mode
+time.car: time (in minutes) to drive to campus
+cost.car: cost (in dollars) to drive to campus
+time.bus: time (in minutes) to ride the bus to campus
+cost.bus: cost (in dollars) to ride the bus to campus
+time.bike: time (in minutes) to ride a bike to campus
+cost.bike: cost (in dollars) to ride a bike to campus
+time.walk: time (in minutes) to walk to campus
+cost.walk: cost (in dollars) to walk to campus
+age: age
+income: annual income (in 1000 dollars)
+marital_status: marital status, either "single" or "married"
