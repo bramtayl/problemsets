@@ -1,239 +1,133 @@
-# 1
-
-Load packages, rename variables to be more descriptive, and recode the dummy
-variables as logical.
+---
+title: Problem set 1
+output: pdf_document
+author: "Brandon Taylor"
+---
 
 ```{r}
+# prerequisites for other packages
+library(carData)
+library(zoo, warn.conflicts = FALSE)
+
 library(car)
-library(dplyr)
-library(purrr)
+library(broom)
+library(dplyr, warn.conflicts = FALSE)
+library(lmtest)
+library(pander)
 library(readr)
 library(sandwich)
-library(lmtest)
-
-commute_binary = 
-    read_csv("commute_binary.csv") %>%
-    rename(
-        individual_id = id,
-        commute_mode = mode,
-        drive_time_minutes = time.car,
-        drive_cost_dollars = cost.car,
-        bus_time_minutes = time.bus,
-        bus_cost_dollars = cost.bus,
-        gas_price_dollars = price_gas,
-        daily_snow_inches = snowfall,
-        age_years = age,
-        income_thousand_dollas = income
-    ) %>%
-    mutate(
-        construction = as.logical(construction),
-        bus_detour = as.logical(bus_detour),
-    )
+library(tidyr)
 ```
+
+# 1
 
 ## a
 
-Add a variable that is `TRUE` if someone drives, and `FALSE` otherwise.
-
-```{r}
-commute_binary = 
-    commute_binary %>%
-    mutate(
-        drives = commute_mode == "car"
-    )
-```
-
-Calculate the probability model.
-
-```{r}
-probability_model = lm(
-    drives ~ drive_cost_dollars + drive_time_minutes + bus_time_minutes,
-    commute_binary
-)
-```
-
 ### i
 
-Here are the estimated coefficients.
-
 ```{r}
-coeftest(probability_model)
+commute_binary = read_csv("commute_binary.csv", show_col_types = FALSE)
+
+commute_binary_long = 
+    commute_binary %>%
+    select(id,
+        `Chosen commute mode` = mode,
+        `Drive cost in $` = cost.car,
+        `Drive time in minutes` = time.car,
+        `Bus time in minutes` = time.bus
+    ) %>%
+    pivot_longer(
+        c(
+            `Drive cost in $`,
+            `Drive time in minutes`,
+            `Bus time in minutes`
+        ),
+        names_to = "Variable"
+    )
+
+get_median_and_mean = function(data) {
+    data %>%
+    summarize(
+        `Median value` = median(value),
+        `Mean value` = mean(value),
+        .groups = "drop"
+    )
+}
+
+commute_binary_long %>%
+    group_by(Variable) %>%
+    get_median_and_mean() %>%
+    pander()
 ```
 
-Here are the heteroskedastic-robust standard errors.
+For all three variables, the mean is higher than the median, suggesting right skewed distributions.
 
-```{r}
-vcovHC(probability_model)
-```
+## b
 
 ### ii
 
-Calculate the predicted probabilties, and see how many are infeasible, that is,
-not between 0 and 1
-
 ```{r}
-probability_model_prediction = predict(probability_model, commute_binary)
-sum(!(0 <= probability_model_prediction & probability_model_prediction <= 1))
+commute_binary_long %>%
+    group_by(`Chosen commute mode`, Variable) %>%
+    get_median_and_mean() %>%
+    pander()
 ```
 
-### iii
-
-```{r}
-linearHypothesis(probability_model, "drive_time_minutes = bus_time_minutes")
-```
+Those who choose to drive have lower mean drive times and costs.
+These students might choose to drive because of this.
+Counterintuitively, those who choose to take the bus have higher mean bus times.
+The medians follow the same pattern as the means, with the exception that the median bus time is the same for both groups.
 
 # 2
 
 ## a
 
-### i
-
-Calculate the logistic model.
+Calculate the linear probability model.
 
 ```{r}
-logistic_model =
-    glm(
-        drives ~ drive_cost_dollars + drive_time_minutes + bus_time_minutes,
-        commute_binary,
-        family = "binomial"
-    )
-summary(logistic_model)
+model = lm(I(mode == "car") ~ cost.car + time.car + time.bus, commute_binary)
 ```
+
+### i
+
+Here are the coefficients and heteroskedastic-robust standard errors.
+
+```{r}
+coeftest(model, vcov. = vcovHC(model)) %>%
+    tidy() %>%
+    pander()
+```
+
+All coefficients are significantly different from 0 at the $\alpha = 0.2\%$ level.
+
+```{r}
+coefficients = coef(model)
+```
+
+The coefficients mean the following:
+
+- When drive time increases by 1 minute, the probabilility someone will drive decreases by `r pander(-coefficients[["time.car"]] * 100)`% on avarage
+- When drive cost increases by $1, the probability someone will drive decreases by `r pander(-coefficients[["cost.car"]] * 100)`% on avarage
+- When bus time increases by 1 minute, the probability someone will drive increases by `r pander(coefficients[["time.bus"]] * 100)`% on average
 
 ### ii
 
-For convenience, define
-
-$$ Y_n = β_0 + β_1 C_{nc} + β_2 T_{nc} + β_3 T_{nb} $$
-
-Then
-
-$$ ln \left( \frac{P_n}{1 - P_n} \right) = Y_n $$
-
-Solve for $P$.
-
-$$ \frac{P_n}{1 - P_n} = e^{Y_n} $$
-$$ P_n = e^{Y_n}(1 - P_n) $$
-$$ P_n = e^{Y_n} - P_n e^{Y_n} $$
-$$ P_n + P_n e^{Y_n} = e^{Y_n} $$
-$$ P_n (1 + e^{Y_n}) = e^{Y_n} $$
-$$ P_n = \frac{e^{Y_n}}{1 + e^{Y_n}} $$
-
-First, find $\frac{d P_n}{d Y_n}$
-
-$$ \frac{d P_n}{d Y_n} = \frac{(1 + e^{Y_n}) e^{Y_n} - (e^{Y_n})^2} {(1 + e^{Y_n})^2} $$
-$$ \frac{d P_n}{d Y_n} = \frac{e^{Y_n} + (e^{Y_n})^2 - (e^{Y_n})^2} {(1 + e^{Y_n})^2} $$
-$$ \frac{d P_n}{d Y_n} = \frac{e^{Y_n} + (e^{Y_n})^2 - (e^{Y_n})^2} {(1 + e^{Y_n})^2} $$
-$$ \frac{d P_n}{d Y_n} = \frac{e^{Y_n}} {(1 + e^{Y_n})^2} $$
-
-In R,
-
 ```{r}
-expY = exp(predict(logistic_model, commute_binary))
-dpdY = expY / (1 + expY)^2
-dPdY_summary = summary(dpdY)
+predictions = predict(model)
+number_of_infeasible_probabilities = sum(!(0 <= predictions & predictions <= 1))
 ```
 
-By the chain rule,
-
-$$ \frac{d P_n}{d C_{nc}} = \frac{d P_n}{d Y_n} \frac{d Y_n}{d C_{nc}} $$
-$$ \frac{d P_n}{d C_{nc}} = β_1 \frac{d P_n}{d Y_n} $$
-
-The formulas for the other marginal effects are similar. Because these are
-linear transformations, we can just multiply the summary statistics of
-$\frac{d P_n}{d Y_n}$ by the respective coefficients.
-
-Define a quick function to remove the intercept from coefficients.
-
-```{r}
-remove_intercept = function(coefficients) {
-    coefficients[names(coefficients) != "(Intercept)"]
-}
-```
-
-```{r}
-logistic_coefficients = coef(logistic_model)
-lapply(
-    remove_intercept(logistic_coefficients),
-    function(coefficient) {
-        dPdY_summary * coefficient
-    }
-)
-```
-
-The marginal effects of the probability model are constant, and just equal to
-the coefficients.
-
-```{r}
-remove_intercept(coef(probability_model))
-```
-
-These are similar to the average marginal effects from the logisitic model
-above.
+Using this model, we predict `r pander(number_of_infeasible_probabilities)` students have infeasible probabilites of driving.
+This seems like a small number out of `r nrow(commute_binary)` students, so I am not overly worried about using a linear probability model.
 
 ### iii
 
-Start with the model and take the total derivative:
-
-$$ d Y = β_1 d C_c + β_2 d T_c + β_3 d T_b $$
-
-Divide through by $-β_1$. Since $β_1$ is negative, $-β_1$ is positive, so
-we don't have to flip the inequality.
-
-$$ - \frac{β_0}{β_1} - C_c - \frac{β_2}{β_1} T_c - \frac{β_3}{β_1} T_b > 0 $$
-
-We can reconcile these two models by setting
-
-$$ C_b = - \frac{β_0}{β_1} $$
-$$ k_c = - \frac{β_2}{β_1} $$
-$$ k_b = \frac{β_3}{β_1} $$
-
-Finally, we will need to convert the units of $k_c$ and $k_b$. To convert to
-dollars per hour, multiply by 60, because
-
-$$ \frac{\text{dollars}}{\text{hour}} = \frac{\text{dollars}}{\text{minute}} * \frac{\text{60 minutes}}{\text{hour}} $$
-
-The cost of spending time driving, in dollars per hour, is
-
 ```{r}
-60 * logistic_coefficients[["drive_time_minutes"]] /
-  logistic_coefficients[["drive_cost_dollars"]]
+linearHypothesis(model, "time.car = -time.bus") %>%
+    pander()
 ```
 
-The cost of spending time riding the bus, in dollars per hour, is
-
-```{r}
-- 60 * logistic_coefficients[["bus_time_minutes"]] /
-  logistic_coefficients[["drive_cost_dollars"]]
-```
-
-# b
-
-Add a variable for the drive-cost income ratio:
-
-```{r}
-commute_binary = 
-    commute_binary %>%
-    mutate(
-        drive_cost_income_ratio = 
-            drive_cost_dollars / (income_thousand_dollas * 1000)
-    )
-```
-
-```{r}
-income_model =
-    glm(
-        drives ~ drive_cost_income_ratio + drive_time_minutes + bus_time_minutes,
-        commute_binary,
-        family = "binomial"
-    )
-summary(income_model)
-```
-
-
-
-
-
-
-
-
+The coefficients for drive time and bus time are significantly different.
+The coefficient for drive time is higher in absolute value than the coefficient for bus time.
+This might be because students enjoy time on the bus more than time in the car, because students can study or sleep on the bus.
+If a delay were to increase equally the time to drive and the time to take the bus, I would expect the proportion of drivers to decrease, because people would prefer to spend the extra time on the bus rather than in a car.

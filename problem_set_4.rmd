@@ -1,0 +1,375 @@
+---
+title: Problem Set 3
+author: "Brandon Taylor"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r}
+library(dfidx, warn.conflicts = FALSE)
+library(mlogit)
+library(pander)
+library(readr)
+library(tidyr)
+
+# load last so we use filter from dplyr
+library(dplyr, warn.conflicts = FALSE)
+```
+
+# 1
+
+## a
+
+```{r}
+camping <- 
+    read_csv("camping.csv", show_col_types = FALSE) %>%
+    mutate(
+        visit = as.logical(visit),
+        mountain = as.logical(mountain)
+    )
+
+camping_indexed = 
+    camping %>%
+    dfidx(idx = c("camper_id", "park"))
+
+multinomial_model = mlogit(
+    visit ~ cost + time + mountain | 0 | 0,
+    camping_indexed
+)
+
+summary(multinomial_model)
+```
+
+### i
+
+```{r}
+multinomial_coefficients = coef(multinomial_model)
+multinomial_cost_coefficient = multinomial_coefficients[["cost"]]
+multinomial_time_coefficient = multinomial_coefficients[["time"]]
+multinomial_mountain_coefficient = multinomial_coefficients[["mountainTRUE"]]
+```
+
+- When the cost of an alternative increases by $1, a student's utility for that alternative increases by `r pander(multinomial_cost_coefficient)`.
+- When the commute time of an alternative increases by 1 minute, a student's utility for that alternative increases by `r pander(multinomial_time_coefficient)`.
+- As compared to going to a beach, going to a mountain increases a student's utility for that alternative by `r pander(multinomial_mountain_coefficient)`.
+
+### ii
+
+By the implicit function theorem,
+
+$$ \frac{∂C_{nj}}{∂T_{nj}} = -\frac{β_2}{β_1} $$
+
+This is in dollars per minute.
+To get dollars per hour, I will multiply by 60.
+So, in dollars, a student values an hour of commute time at
+
+```{r}
+pander(-60 * multinomial_time_coefficient / multinomial_cost_coefficient)
+```
+
+By the implicit function theorem,
+
+$$ \frac{∂C_{nj}}{∂M_{j}} = -\frac{β_3}{β_1} $$
+
+So, in dollars, a student values going to a mountain instead of a beach at
+
+```{r}
+pander(-multinomial_mountain_coefficient / multinomial_cost_coefficient)
+```
+
+### iii
+
+```{r}
+greylock_costs = 
+    camping %>%
+    filter(park == "Mount Greylock") %>%
+    select(
+        camper_id,
+        greylock_cost = cost
+    )
+
+greylock_costs %>%
+    mutate(
+        greylock_probability = 
+            fitted(multinomial_model, type = "probabilities")[,"Mount Greylock"],
+        greylock_elasticity = 
+            multinomial_cost_coefficient * greylock_cost * (1 - greylock_probability),
+        cross_elasticity = 
+            -multinomial_cost_coefficient * greylock_cost * greylock_probability
+    ) %>%
+    summarize(
+        `Mean Greylock elasticity` = mean(greylock_elasticity),
+        `Mean non-Greylock elasiticity` = mean(cross_elasticity)
+    ) %>%
+    pander()
+```
+
+The substitution elasticity for all other alternatives is the same.
+This is due to the independence of irrelevant alternatives assumption.
+
+## b
+
+```{r}
+parks = 
+    camping %>%
+    select(park, mountain) %>%
+    distinct()
+
+nested_model = mlogit(
+    visit ~ cost + time + mountain | 0 | 0,
+    camping_indexed,
+    nests = list(
+        mountain = 
+            parks %>%
+            filter(mountain) %>%
+            .$park,
+        beach =
+            parks %>%
+            filter(!mountain) %>%
+            .$park
+    )
+)
+
+summary(nested_model)
+```
+
+### i 
+
+```{r}
+nested_coefficients = coef(nested_model)
+nested_cost_coefficient = nested_coefficients[["cost"]]
+nested_time_coefficient = nested_coefficients[["time"]]
+nested_mountain_coefficient = nested_coefficients[["mountainTRUE"]]
+mountain_correlation = 1 - nested_coefficients[["iv:mountain"]]
+beach_correlation = 1 - nested_coefficients[["iv:beach"]]
+```
+
+- When the cost of an alternative increases by $1, a student's utility for that alternative increases by `r pander(nested_cost_coefficient)`.
+- When the time of an alternative increases by 1 minute, a student's utility for that alternative increases by `r pander(nested_time_coefficient)`.
+- As compared to going to a beach, going to a mountain increases a student's utility for that alternative by `r pander(nested_mountain_coefficient)`.
+- The error correlation of the mountain alternatives is `r pander(mountain_correlation * 100)`%.
+- The error correlation of the beach alternatives is `r pander(beach_correlation * 100)`%.
+
+### ii
+
+We will test that the null hypothesis that people do not nest beaches and mountains, that is, the error correlation within the two groups alternatives is 0.
+
+$$H_0: \lambda_{\text{mountain}} = \lambda_{\text{beach}} = 0$$
+
+```{r}
+nest_test = lrtest(multinomial_model, nested_model)
+nest_test
+```
+
+Because p = `r pander(nest_test[["Pr(>Chisq)"]][2])` < 0.05, we can reject the null hypothesis that people do not nest beaches and mountains.
+
+### iii
+
+The calculations here are the same as above:
+
+In dollars, a student values an hour of commute time at
+
+```{r}
+pander(-60 * nested_time_coefficient / nested_cost_coefficient)
+```
+
+In dollars, a student values going to a mountain instead of a beach at
+
+```{r}
+pander(-nested_mountain_coefficient / nested_cost_coefficient)
+```
+
+### iv
+
+```{r}
+mountain_correlation_ratio = (1 - mountain_correlation) / mountain_correlation
+
+bind_cols(
+    greylock_costs,
+    fitted(nested_model, type = "probabilities") %>%
+        as_tibble()
+) %>%
+    mutate(
+        mountain_probability = `Mount Greylock` + `October Mountain`,
+        greylock_elasticity = 
+            nested_cost_coefficient * 
+            greylock_cost *
+            (
+                1 / mountain_correlation -
+                mountain_correlation_ratio *
+                `Mount Greylock` / mountain_probability -
+                `Mount Greylock`
+            ),
+        non_mountain_elasticity = 
+            - nested_cost_coefficient * 
+            greylock_cost *
+            `Mount Greylock`,
+        other_mountain_elasticity = 
+            non_mountain_elasticity *
+            (1 + mountain_correlation_ratio * 1 / mountain_probability)
+    ) %>%
+    summarize(
+        `Mean Greylock elasticity` = mean(greylock_elasticity),
+        `Mean October elasticity` = mean(other_mountain_elasticity),
+        `Mean beach elasticity` = mean(non_mountain_elasticity),
+    ) %>%
+    pander()
+```
+
+As expected, when the the cost of going to Mount Greylock increases, the probability that people will go to October mountain instead increases more, proportionally, than the probability that people will go to a beach.
+This is because, in the nested model, people first choose whether to go to a mountain or beach. Of those who choose to go to a mountain, those who don't go to Mount Greylock go to October mountain instead.
+
+# 3
+
+```{r}
+random_model = mlogit(
+    formula = visit ~ cost + time + mountain | 0 | 0,
+    data = camping_indexed,
+    rpar = c(cost = "n", time = "n", mountainTRUE = "n"),
+    R = 100,
+    seed = 703
+)
+
+summary(random_model)
+```
+
+## a
+
+```{r}
+random_coefficients = coef(random_model)
+```
+
+- When the cost of an alternative increases by $1, a student's utility for that alternative increases by a mean of `r pander(random_coefficients[["cost"]])`, with a standard deviation of `r pander(random_coefficients[["sd.cost"]])`.
+- When the time of an alternative increases by 1 minute, a student's utility for that alternative increases by a mean of `r pander(random_coefficients[["time"]])`, with a standard deviation of `r pander(random_coefficients[["sd.time"]])`.
+- As compared to going to a beach, going to a mountain increases a student's utility for that alternative by a mean of `r pander(random_coefficients[["mountainTRUE"]])` with a standard deviation of `r pander(random_coefficients[["sd.mountainTRUE"]])`.
+
+## b
+
+```{r}
+fixed_cost_model = mlogit(
+    formula = visit ~ cost + time + mountain | 0 | 0,
+    data = camping_indexed,
+    rpar = c(time = "n", mountainTRUE = "n"),
+    R = 100,
+    seed = 703
+)
+
+summary(fixed_cost_model)
+```
+
+### i
+
+```{r}
+fixed_cost_coefficients = coef(fixed_cost_model)
+fixed_cost_cost_coefficient = fixed_cost_coefficients[["cost"]]
+fixed_cost_time_mean = fixed_cost_coefficients[["time"]]
+fixed_cost_time_deviation = fixed_cost_coefficients[["sd.time"]]
+fixed_cost_mountain_mean = fixed_cost_coefficients[["mountainTRUE"]]
+fixed_cost_mountain_deviation = fixed_cost_coefficients[["sd.mountainTRUE"]]
+```
+
+- When the cost of an alternative increases by $1, a student's utility for that alternative increases by `r pander(fixed_cost_cost_coefficient)`.
+- When the time of an alternative increases by 1 minute, a student's utility for that alternative increases by a mean of `r pander(fixed_cost_time_mean)` with a standard deviation of `r pander(fixed_cost_time_deviation)`.
+- As compared to going to a beach, going to a mountain increases a student's utility for that alternative by a mean of `r pander(fixed_cost_mountain_mean)` with a standard deviation of `r pander(fixed_cost_mountain_deviation)`.
+
+### ii
+
+The null hypothesis is that $β_1$ is fixed, that is, the standard deviation of $β_1$ is 0.
+
+$$H_0: σ_1^2 = 0$$
+
+```{r}
+fixed_cost_test = lrtest(random_model, fixed_cost_model)
+```
+
+Because p = `r pander(fixed_cost_test[["Pr(>Chisq)"]][2])` > 0.05, we can't reject the null that $β_1$ is fixed.
+
+### iii
+
+In dollars, a student values an hour of commute time with a mean of
+
+```{r}
+pander(-60 * fixed_cost_time_mean / fixed_cost_cost_coefficient)
+```
+
+with a standard deviation of
+
+```{r}
+pander(abs(60 * fixed_cost_time_deviation / fixed_cost_cost_coefficient))
+```
+
+In dollars, a student values going to a mountain instead of a beach at
+
+```{r}
+pander(-fixed_cost_mountain_mean / fixed_cost_cost_coefficient)
+```
+
+with a standard deviation of
+
+```{r}
+pander(abs(fixed_cost_mountain_deviation / fixed_cost_cost_coefficient))
+```
+
+### iv
+
+```{r}
+pander(1 - pnorm((0 - fixed_cost_mountain_mean) / fixed_cost_mountain_deviation))
+```
+
+of students have a positive value of going to the mountains as opposed to the beach.
+
+## c 
+
+### i
+
+This is the how the number of campers who choose each alternative will change after the increased Greylock cost.
+
+```{r}
+increased_indexed = 
+    camping %>%
+    mutate(
+        cost = ifelse(park == "Mount Greylock", cost + 20, cost)
+    ) %>%
+    dfidx(idx = c("camper_id", "park"))
+
+get_expectations <- function(model, data) {
+    # Each column is an alternative. Sum columns
+    expectations <- 
+        predict(model, newdata = data, type = "probabilities") %>%
+        apply(2, sum)
+    tibble(
+        Alternative = names(expectations),
+        expectation = expectations
+    )
+}
+
+bind_rows(
+    get_expectations(fixed_cost_model, camping_indexed) %>%
+        mutate(scenario = "Original Cost"),
+    get_expectations(fixed_cost_model, increased_indexed) %>%
+        mutate(scenario = "Increased Cost")
+) %>%
+    pivot_wider(names_from = scenario, values_from = expectation) %>%
+    mutate(Difference = `Increased Cost` - `Original Cost`) %>%
+    pander()
+```
+
+
+### ii
+
+The change in economic surplus due the increased Greylock cost will be the following:
+
+```{r}
+tibble(
+    `Original Cost` =
+        sum(logsum(fixed_cost_model, data = camping_indexed)) /
+            -multinomial_cost_coefficient,
+    `Increased Cost` =
+        sum(logsum(fixed_cost_model, data = increased_indexed)) /
+            -multinomial_cost_coefficient,
+
+) %>%
+    mutate(Difference = `Increased Cost` - `Original Cost`) %>%
+    pander()
+```

@@ -1,0 +1,494 @@
+---
+title: Problem Set 2
+author: "Brandon Taylor"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r}
+library(dfidx, warn.conflicts = FALSE)
+library(gmm)
+library(mlogit)
+library(pander)
+library(purrr)
+library(readr)
+library(tidyr)
+
+# load last so we use filter from dplyr
+library(dplyr, warn.conflicts = FALSE)
+```
+
+# 1
+
+```{r}
+commute_binary <-
+    read_csv("commute_binary.csv", show_col_types = FALSE) %>%
+    mutate(drove = mode == "car")
+```
+
+## a
+
+### i
+
+$$ V_{nc} = β_0 + β_1 C_{nc} + β_2 T_{nc} $$
+$$ U_{nc} = V_{nc} + \epsilon_{nc} $$
+
+$$ V_{nb} = β_1 C_{nb} + β_{tb} T_{nb} $$
+$$ U_{nb} = V_{nb} + \epsilon_{nb} $$
+
+where, in addition to the variables defined in the prompt,
+
+| Variable | Value |
+| - | - |
+| $β_{tb}$ | Coefficient for bus time |
+| $V_{nc}$ | Representative utility of student $n$ if they drive |
+| $V_{nb}$ | Representative utility of student $n$ if they take the bus |
+| $U_{nc}$ | Utility of student $n$ if they drive |
+| $U_{nb}$ | Utility of student $n$ if they take the bus |
+| $\epsilon_{nc}$ | Influence of unobserved characteristics of student $n$ if they drive |
+| $\epsilon_{nb}$ | Influence of unobserved characteristics of student $n$ if they take the bus |
+
+For all students, normalize utility such that:
+
+- The intercept of representative utility of students if they take the bus is 0.
+- $var \left( \epsilon_{nc} \right) = var \left( \epsilon_{nb} \right) = \frac{{\pi}^2}{6}$
+
+Because this normalization is arbitrary, we can't compare utility between students.
+
+$C_{nb}$ is always 0.
+
+```{r}
+all(commute_binary$cost.bus == 0) %>% pander()
+```
+
+Let $β_3 = - β_{tb}$.
+
+Then,
+
+$$ V_{nc} - V_{nb} = β_0 + β_1 C_{nc} + β_2 T_{nc} + β_3 T_{nb} $$
+
+```{r}
+binary_model <- glm(
+    drove ~ cost.car + time.car + time.bus,
+    commute_binary,
+    family = "binomial"
+)
+
+pander(summary(binary_model))
+```
+
+```{r}
+binary_coefficients <- coef(binary_model)
+pander(binary_coefficients[["(Intercept)"]])
+```
+
+When drive cost increases by $1, a student's utility if they *drive* increases by
+
+```{r}
+binary_cost_coefficient <- binary_coefficients[["cost.car"]]
+pander(binary_cost_coefficient)
+```
+
+When drive time increases by 1 minute, a student's utility if they *drive* increases by
+
+```{r}
+binary_car_time_coefficient <- binary_coefficients[["time.car"]]
+pander(binary_car_time_coefficient)
+```
+
+When bus time increases by 1 minute, a student's utility if they take the *bus* increases by
+
+```{r}
+binary_bus_time_coefficient <- binary_coefficients[["time.bus"]]
+pander(-binary_bus_time_coefficient)
+```
+
+This is negative because $β_3 = - β_{tb}$
+
+### ii
+
+For marginal effects,
+
+$$ \frac{ ∂P_{ni} }{ ∂z_{ni} } = β_z P_{ni} \left( 1 - P_{ni} \right) $$
+
+For cross-marginal effects,
+
+$$ \frac{ ∂P_{ni} }{ ∂z_{nj} } = - β_z P_{ni} P_{nj} $$
+
+There is one cross-marginal coefficient.
+$β_{tb} = - β_3$, and since there are only two alternatives, $P_{nj} = 1 - P_{ni}$.
+The negatives cancel out, so I can use the same formula for all three coefficients.
+
+```{r}
+binary_predictions <- predict(binary_model, type = "response")
+prediction_products <- binary_predictions * (1 - binary_predictions)
+
+get_quartiles_and_mean <- function(vector) {
+    # quartiles by default
+    # turn the quantiles into a tibble and add the mean
+    quantile(vector) %>%
+        as.list() %>%
+        as_tibble() %>%
+        mutate(Mean = mean(vector))
+}
+
+tibble(
+    Coefficient = c(
+        "Car cost in dollars",
+        "Drive time in minutes",
+        "Bus time in minutes"
+    ),
+    symbol = c("cost.car", "time.car", "time.bus")
+) %>%
+    group_by(Coefficient) %>%
+    summarize(
+        get_quartiles_and_mean(
+            prediction_products * binary_coefficients[[symbol]]
+        ),
+        .groups = "drop"
+    ) %>%
+    pander()
+```
+
+The mean marginal effects are very close to the estimates from problem set 1.
+
+### b
+
+By the implicit function theorem,
+
+$$ \frac{∂C_{nc}}{∂T_{nc}} = -\frac{β_2}{β_1} $$
+$$ \frac{∂C_{nb}}{∂T_{nb}} = \frac{β_3}{β_1} $$
+
+Both are in dollars per minute.
+To get dollars per hour, I will multiply by 60.
+
+When drive time goes up by an hour, and drive costs go up by $- 60 \frac{β_2}{β_1}$ dollars, the student remains indifferent, because $V_{nc}$ is fixed.
+The student must value the hour at $- 60 \frac{β_2}{β_1}$ dollars, to balance out the extra cost they have to pay.
+I can use a similar argument for bus time.
+
+So, in dollars, a student values an hour in the car at 
+
+```{r}
+pander(-60 * binary_car_time_coefficient / binary_cost_coefficient)
+```
+
+In dollars, a student values an hour on the bus at
+
+```{r}
+pander(60 * binary_bus_time_coefficient / binary_cost_coefficient)
+```
+
+## b
+
+### i
+
+The representative utility functions are now:
+
+$$ V_{nc} = β_0 + β_1 \frac{C_{nc}}{I_n} + β_2 T_{nc} $$
+$$ V_{nb} = β_1 \frac{C_{nb}}{I_n} - β_3 T_{nb} $$
+
+Costs are in dollars, but income is in thousands of dollars, so 1 unit of the cost-income ratio represents 0.001.
+
+```{r}
+income_model <- glm(
+    drove ~ I(cost.car / income) + time.car + time.bus,
+    commute_binary,
+    family = "binomial"
+)
+
+summary(income_model) %>%
+    pander()
+```
+
+When the drive cost-income ratio and drive time are both 0, a student's representative utility if they drive is
+
+```{r}
+income_coefficients <- coef(income_model)
+pander(income_coefficients[["(Intercept)"]])
+```
+
+When the drive cost-income ratio increases by 1 unit (0.001), a student's utility if they drive increases by
+
+```{r}
+cost_income_ratio_coefficient <- income_coefficients[["I(cost.car/income)"]]
+pander(cost_income_ratio_coefficient)
+```
+
+When drive time increases by 1 minute, a student's utility if they drive increases by
+
+```{r}
+income_car_time_coefficient <- income_coefficients[["time.car"]]
+pander(income_car_time_coefficient)
+```
+
+When bus time increases by 1 minute, a student's utility if they take the bus increases by
+
+```{r}
+income_bus_time_coefficient <- income_coefficients[["time.bus"]]
+pander(-income_bus_time_coefficient)
+```
+
+This is negative because $β_3 = - β_{tb}$
+
+### ii
+
+$$ \frac{∂V_{nc}}{∂C_{nc}} = \frac{β_1}{I_n} $$
+
+Costs subtract from income, so this is the negative marginal utility of a dollar.
+However, if one only uses utility to represent individual choices, utility is not interpersonally comparable.
+
+```{r}
+incomes_in_thousands <- c(15, 25, 35)
+# format the names as dollars
+names(incomes_in_thousands) <- paste0("$", incomes_in_thousands, ",000")
+marginal_utilities <- -cost_income_ratio_coefficient / incomes_in_thousands
+pander(marginal_utilities)
+```
+
+By the implicit function theorem:
+
+$$ \frac{∂C_{nc}}{∂T_{nc}} = - \frac{β_2 I_n}{β_1} $$
+$$ \frac{∂C_{nb}}{∂T_{nb}} = \frac{β_3 I_n}{β_1} $$
+
+Both are in dollars per minute.
+To get dollars per hour, I will multiply by 60.
+
+In dollars, at these incomes, students value an hour in the car at 
+
+```{r}
+pander(
+    -60 * 
+    income_car_time_coefficient *
+    incomes_in_thousands / cost_income_ratio_coefficient
+)
+```
+
+In dollars, at these incomes, students value an hour on the bus at 
+
+```{r}
+pander(
+    60 * 
+    income_bus_time_coefficient * 
+    incomes_in_thousands / cost_income_ratio_coefficient
+)
+```
+
+# 2
+
+## a
+
+### i
+
+In addition to the variables in the prompt, define:
+
+| Variable | Value |
+| - | - |
+| $\epsilon_{nj}$ | Influence of unobserved characteristics of student $n$ if they choose alternative $j$ |
+
+For all students, normalize utility such that:
+
+- The intercept of representative utility of students if they bike is 0.
+- $∀ j \left( var \left( \epsilon_{nj} \right) = \frac{{\pi}^2}{6} \right)$
+
+Because both normalizations are arbitrary, we can't compare utility, or even utility differences, between students.
+
+```{r}
+commute_multinomial <-
+    read_csv("commute_multinomial.csv", show_col_types = FALSE)
+
+add_indices <- function(data) {
+    dfidx(data, shape = "wide", varying = 3:10, choice = "mode")
+}
+
+indexed <- add_indices(commute_multinomial)
+
+# the first part is variables that vary by alternative
+# but have the same coefficient for all alternatives
+# the second part is variables that don't vary by alternative
+# 1 stands for the intercept
+# the third part is variables that vary by alternative
+# and a have different coefficients for each alternative
+multinomial_formula <- mode ~ cost | 1 | time
+multinomial_model <- mlogit(multinomial_formula, indexed)
+summary(multinomial_model)
+```
+
+```{r}
+multinomial_coefficients <- coef(multinomial_model)
+
+# these are easier for me to interpret in table form
+get_coefficients_table <- function(multinomial_coefficients) {
+    multinomial_coefficients %>%
+        # convert to tibble
+        as.list() %>%
+        as_tibble() %>%
+        # stack coefficient-alternative combos
+        pivot_longer(
+            c(
+                `(Intercept):bus`,
+                `(Intercept):car`,
+                `(Intercept):walk`,
+                `time:bike`,
+                `time:bus`,
+                `time:car`,
+                `time:walk`
+            ),
+            names_to = c("coefficient", "Alternative"),
+            names_sep = "\\:",
+            values_to = "value"
+        ) %>%
+        # put coefficients in columns
+        pivot_wider(names_from = coefficient, values_from = value) %>%
+        # reorder to match model
+        select(Alternative, `(Intercept)`, cost, time)
+}
+
+pander(get_coefficients_table(multinomial_coefficients))
+```
+
+- When the time and cost of the alternative are both zero, a student's representative utility for the alternative is in the `(Intercept)` column. This is missing for biking because we normalized utility such that this intercept is 0.
+- When the cost of the alternative increases by $1, the increase in the student's utility for the alternative is in the `cost` column. This coefficient is the same for all alternatives.
+- When the time of the alternative increases by 1 minute, the increase in the student's utility for the alternative is in the `time` column. 
+
+### ii
+
+```{r}
+multinomial_cost_coefficient <- multinomial_coefficients[["cost"]]
+
+multinomial_predictions <- predict(multinomial_model, indexed)
+
+commute_multinomial %>%
+    select(id, cost.car) %>%
+    mutate(
+        car_probability = multinomial_predictions[, "car"],
+        car = multinomial_cost_coefficient * cost.car * (1 - car_probability),
+        # cross elasicities are the same for all other alternatives
+        `bike, bus, and walk` =
+            -multinomial_cost_coefficient * cost.car * car_probability
+    ) %>%
+    select(id, car, `bike, bus, and walk`) %>%
+    pivot_longer(
+        c(car, `bike, bus, and walk`),
+        names_to = "Alternatives",
+        values_to = "elasticity"
+    ) %>%
+    group_by(Alternatives) %>%
+    summarize(get_quartiles_and_mean(elasticity)) %>%
+    pander()
+```
+
+The cross-elasticities for substituting driving with biking, taking the bus, or walking are all the same.
+The cross-elasticity only depends on the characteristics of the driving alternative.
+This is called proportional substitution.
+The independence of irrelevant alternatives (IIA) assumption for logistic models implies this result.
+
+## b
+
+### i 
+
+The interpretations of these coefficients are the same as above.
+
+```{r}
+marital_status_coefficients <-
+    commute_multinomial %>%
+    group_by(marital_status) %>%
+    summarize(
+        # get the coefficients as a tibble
+        mlogit(
+            multinomial_formula,
+            add_indices(cur_data())
+        ) %>%
+            coef() %>%
+            get_coefficients_table(),
+        .groups = "drop"
+    )
+
+pander(marital_status_coefficients)
+```
+
+### ii
+
+I can't use this data to compare the marginal utility of income between the two groups.
+Within one regression, the marginal utility of income is the negative of the cost parameter, because costs subtract from income.
+However, I used the variance of the error term to scale utility, and this variance might differ between the two groups.
+
+### iii
+
+By the implicit function theorem,
+
+$$ \frac{∂C_{nj}}{∂T_{nj}} = -\frac{β_j}{β_1} $$
+
+This is in dollars per minute.
+To get dollars per hour, I will multiply by 60.
+
+```{r}
+marital_status_coefficients %>%
+    mutate(value = -60 * time / cost) %>%
+    select(Alternative, marital_status, value) %>%
+    # compare side by side
+    pivot_wider(names_from = "marital_status", values_from = "value") %>%
+    pander()
+```
+
+For all four alternatives, on average, married students have a higher willingness to pay to avoid an hour of commute time.
+Perhaps married students value the alternative, time with their family, more.
+Or perhaps married students have more responsibilities at home.
+
+## c
+
+### i
+
+```{r}
+reduced_time_data <- add_indices(
+    commute_multinomial %>%
+        # reduce only bus commute times
+        mutate(time.bus = time.bus * 0.8)
+)
+
+get_expectations <- function(predictions) {
+    # Each column is an alternative. Sum columns
+    expectations <- apply(predictions, 2, sum)
+    tibble(
+        Alternative = names(expectations),
+        expectation = expectations
+    )
+}
+
+bind_rows(
+    get_expectations(multinomial_predictions) %>%
+        mutate(scenario = "Original Time"),
+    get_expectations(predict(multinomial_model, reduced_time_data)) %>%
+        mutate(scenario = "Reduced Time")
+) %>%
+    pivot_wider(names_from = scenario, values_from = expectation) %>%
+    mutate(Difference = `Reduced Time` - `Original Time`) %>%
+    pander()
+```
+
+The change in the number of students who choose each alternative is in the `Difference` column.
+Several more students choose to take the bus, and most of those students formerly drove.
+However, there a few students who formerly walked or biked, and now take the bus.
+This might increase the carbon footprint of the policy somewhat.
+
+### ii
+
+The costs are small relative to any one student's income, so I can assume the marginal utility of income is constant for any one student.
+However, if one only uses utility to represent individual choices, utility is not interpersonally comparable.
+Measuring consumer surplus in dollars instead appeals to the compensation principle: how much students are willing to pay for the lower commute times.
+This weighs wealthier students more, who have a higher ability to pay, and thus willingness to pay.
+
+```{r}
+tibble(
+    `Original Time` =
+        sum(logsum(multinomial_model, data = indexed)) /
+            -multinomial_cost_coefficient,
+    `Reduced Time` =
+        sum(logsum(multinomial_model, data = reduced_time_data)) /
+            -multinomial_cost_coefficient
+) %>%
+    mutate(Difference = `Reduced Time` - `Original Time`) %>%
+    pander()
+```
+
+The increase in consumer surplus is in the `Difference` column.

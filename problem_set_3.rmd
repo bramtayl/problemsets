@@ -1,0 +1,413 @@
+---
+title: Problem Set 3
+author: "Brandon Taylor"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+---
+
+# 1
+
+## a
+
+```{r}
+library(sandwich) # need for gmm
+library(dplyr, warn.conflicts = FALSE)
+library(gmm)
+library(pander)
+library(readr)
+library(tidyr)
+
+commute_multinomial = read_csv("commute_multinomial.csv", show_col_types = FALSE)
+
+long_data = 
+    commute_multinomial %>%
+    select(
+        id,
+        cost.bike,
+        time.bike,
+        cost.bus,
+        time.bus,
+        cost.car,
+        time.car,
+        cost.walk,
+        time.walk
+    ) %>%
+    # put variable-mode combinations into a column, then separate them
+    pivot_longer(-id,
+        names_to = c("variable", "mode"),
+        # regex escape
+        names_sep = "\\.",
+        values_to = "value"
+    ) %>%
+    # put each variable into a column
+    pivot_wider(names_from = variable, values_from = value) %>%
+    # add in the chosen mode
+    left_join(
+        commute_multinomial %>%
+        select(id, chosen_mode = mode),
+        by = "id"
+    ) %>%
+    # check if they chose a mode
+    mutate(
+        chosen = mode == chosen_mode
+    ) %>%
+    select(-chosen_mode)
+
+# calculate log likelihood from alternative utilities
+get_negative_log_likelihood = function (with_utility) {
+    with_exp_utility = 
+        with_utility %>%
+        mutate(exp_utility = exp(utility))
+
+    log_probabilities = 
+        with_exp_utility %>%
+        # first, collect the chosen modes
+        filter(chosen) %>%
+        select(id, mode) %>%
+        # for each chosen mode, add exp utility
+        left_join(
+            with_exp_utility %>% 
+            select(id, mode, exp_utility),
+            by = c("id", "mode")
+        ) %>% 
+        # for each student, add total exp utility
+        left_join(
+            with_exp_utility %>%
+            group_by(id) %>%
+            # sum exp utility for each studet
+            summarize(
+                sum_exp_utility = sum(exp_utility),
+                .groups = "drop"
+            ),
+            by = "id"
+        ) %>% 
+        # divide and log
+        mutate(log_probability = log(exp_utility / sum_exp_utility))
+
+    # negative to maximize
+    -sum(log_probabilities$log_probability)
+}
+
+get_coefficients_table = function(optim_result) {
+    parameters = optim_result$par
+    tibble(
+        coefficient = names(parameters),
+        estimate = parameters,
+        standard_error = 
+            # get from the hessian
+            optim_result$hessian %>%
+            solve() %>%
+            diag() %>%
+            sqrt()
+    ) %>%
+    mutate(
+        # test if they are different from 0
+        z_statistic = (estimate - 0) / standard_error,
+        # twice the left tail
+        p_value = 2 * pnorm(pmin(z_statistic, 1 - z_statistic))
+    )
+}
+
+ML_no_intercept_results = 
+    optim(
+        par = c(cost_coefficient = 0, time_coefficient = 0),
+        fn = function(parameters, matrix_data) {
+            get_negative_log_likelihood(
+                long_data %>%
+                mutate(
+                    utility = 
+                        parameters[["cost_coefficient"]] * cost + 
+                        parameters[["time_coefficient"]] * time
+                )
+            )
+        },
+        matrix_data = commute_multinomial,
+        # an optimization algorithm
+        method = "BFGS",
+        # need the hesssian for standard errors
+        hessian = TRUE
+    )
+
+ML_no_intercept_coefficients = ML_no_intercept_results$par
+
+pander(get_coefficients_table(ML_no_intercept_results))
+```
+
+The coefficients mean:
+
+- When the cost of an alternative increases by $1, utility increases by `r pander(ML_no_intercept_coefficients[["cost_coefficient"]])`.
+- When the time of an alternative increases by 1 minute, utility increases by `r pander(ML_no_intercept_coefficients[["time_coefficient"]])`.
+
+## b
+
+### i
+
+```{r}
+ML_intercepts_results = 
+    optim(
+        par = c(
+            bus_intercept = 0,
+            car_intercept = 0,
+            walk_intercept = 0,
+            cost_coefficient = 0,
+            time_coefficient = 0
+        ),
+        fn = function(parameters, matrix_data) {
+            get_negative_log_likelihood(
+                long_data %>%
+                left_join(
+                    # add in intercepts for each mode
+                    tibble(
+                        mode = c("bike", "bus", "car", "walk"),
+                        intercept = c(
+                            # biking is zero as a baseline
+                            0,
+                            parameters[["bus_intercept"]],
+                            parameters[["car_intercept"]],
+                            parameters[["walk_intercept"]]
+                        )
+                    ), 
+                    by = "mode"
+                ) %>%
+                mutate(
+                    utility = 
+                        intercept +
+                        parameters[["cost_coefficient"]] * cost + 
+                        parameters[["time_coefficient"]] * time
+                )
+            )
+        },
+        matrix_data = commute_multinomial,
+        method = "BFGS",
+        hessian = TRUE
+    )
+
+ML_intercepts_coefficients = ML_intercepts_results$par
+
+pander(get_coefficients_table(ML_intercepts_results))
+```
+
+- Holding time and costs constant, changing from biking to taking the bus increases utility by `r pander(ML_intercepts_coefficients[["bus_intercept"]])`
+- Holding time and costs constant, changing from biking to driving increases utility by `r pander(ML_intercepts_coefficients[["car_intercept"]])`
+- Holding time and costs constant, changing from biking to walking increases utility by `r pander(ML_intercepts_coefficients[["walk_intercept"]])`
+- When the cost of an alternative increases by $1, utility increases by `r pander(ML_intercepts_coefficients[["cost_coefficient"]])`.
+- When the time of an alternative increases by 1 minute, utility increases by `r pander(ML_intercepts_coefficients[["time_coefficient"]])`.
+
+### ii
+
+```{r}
+ratio_test = function(unrestricted_result, restricted_result, restrictions) {
+    1 - pchisq(2 * (-unrestricted_result$value - -restricted_result$value), restrictions)
+}
+
+# I think there are 3 restrictions: that each of non-bike intercepts are 0
+intercepts_p_value = ratio_test(ML_intercepts_results, ML_no_intercept_results, 3)
+```
+
+Because p = `r pander(intercepts_p_value)` < 0.05, adding intercepts for each mode significantly increased model accuracy.
+
+## c
+
+### i
+
+```{r}
+ML_varying_time_results = 
+    optim(
+        par = c(
+            bus_intercept = 0,
+            car_intercept = 0,
+            walk_intercept = 0,
+            cost_coefficient = 0,
+            bike_time_coefficient = 0,
+            bus_time_coefficient = 0,
+            car_time_coefficient = 0,
+            walk_time_coefficient = 0
+        ),
+        fn = function(parameters, matrix_data) {
+            get_negative_log_likelihood(
+                long_data %>%
+                left_join(
+                    tibble(
+                        mode = c("bike", "bus", "car", "walk"),
+                        intercept = c(
+                            0,
+                            parameters[["bus_intercept"]],
+                            parameters[["car_intercept"]],
+                            parameters[["walk_intercept"]]
+                        ),
+                        time_coefficient = c(
+                            parameters[["bike_time_coefficient"]], 
+                            parameters[["bus_time_coefficient"]],
+                            parameters[["car_time_coefficient"]],
+                            parameters[["walk_time_coefficient"]] 
+                        )
+                    ), 
+                    by = "mode"
+                ) %>%
+                mutate(
+                    utility = 
+                        intercept +
+                        parameters[["cost_coefficient"]] * cost + 
+                        time_coefficient * time
+                )
+            )
+        },
+        matrix_data = commute_multinomial,
+        method = "BFGS",
+        hessian = TRUE
+    )
+
+ML_varying_time_coefficients = ML_varying_time_results$par
+
+get_coefficients_table(ML_varying_time_results)
+```
+
+- Holding time and costs constant, changing from biking to taking the bus increases utility by `r pander(ML_varying_time_coefficients[["bus_intercept"]])`
+- Holding time and costs constant, changing from biking to driving increases utility by `r pander(ML_varying_time_coefficients[["car_intercept"]])`
+- Holding time and costs constant, changing from biking to walking increases utility by `r pander(ML_varying_time_coefficients[["walk_intercept"]])`
+- When the cost of an alternative increases by $1, utility increases by `r pander(ML_varying_time_coefficients[["cost_coefficient"]])`.
+- When bike time increases by 1 minute, utility increases by `r pander(ML_varying_time_coefficients[["bike_time_coefficient"]])`.
+- When bus time increases by 1 minute, utility increases by `r pander(ML_varying_time_coefficients[["bus_time_coefficient"]])`.
+- When drive time increases by 1 minute, utility increases by `r pander(ML_varying_time_coefficients[["car_time_coefficient"]])`.
+- When walk time increases by 1 minute, utility increases by `r pander(ML_varying_time_coefficients[["walk_time_coefficient"]])`.
+
+### ii
+
+```{r}
+# I think there are 3 restrictions: that each of the non-bike time coefficients equals the
+# bike time coefficient, where I arbitrarily chose biking as the baseline
+ML_varying_time_p_value = ratio_test(ML_varying_time_results, ML_intercepts_results, 3)
+```
+
+Because p = `r pander(ML_varying_time_p_value)` < 0.05, varying the time coefficient by mode significantly increased model accuracy.
+
+# 2
+
+## a
+
+```{r}
+matrix_data = 
+    read_csv("commute_binary.csv", show_col_types = FALSE) %>%
+    mutate(
+        # multiply by 1 so its numeric
+        drives = 1 * (mode == "car"),
+        # negative because we subtract bus utility from car utility
+        negative_time.bus = -time.bus,
+        # for the intercept
+        constant = 1
+    ) %>%
+    select(
+        drives,
+        constant,
+        cost.car,
+        time.car,
+        negative_time.bus,
+        # use these as instruments later
+        price_gas,
+        snowfall,
+        construction,
+        bus_detour
+    ) %>%
+    as.matrix()
+
+parameters = c(
+    car_intercept = 0,
+    cost_coefficient = 0,
+    # use the guesses suggested in the prompt
+    car_time_coefficient = -0.3,
+    bus_time_coefficient = -0.1
+)
+
+get_residuals = function(parameters, predictors, outcome) {
+    # predictors %*% parameters is a matrix with 1 column
+    # get the first column to turn into a vector
+    outcome - 1 / (1 + exp(-((predictors %*% parameters)[, 1])))
+}
+
+predictor_variables = c("constant", "cost.car", "time.car", "negative_time.bus")
+outcome_variable = c("drives")
+
+gmm_result = gmm(
+    g = function(parameters, matrix_data) {
+        predictors = matrix_data[ , predictor_variables]
+        # when we item-wise multiply a vector by a matrix
+        # r will recycle the vector for each column of the matrix
+        get_residuals(parameters, predictors, matrix_data[, outcome_variable]) * predictors
+    },
+    x = matrix_data,
+    t0 = parameters,
+    # assume independence
+    vcov = "iid",
+    method = "Nelder-Mead",
+    control = list(
+        # very small relative tolerance (because we are close to 0?)
+        reltol = 1e-25,
+        # give up after 10k iterations
+        maxit = 10000
+    )
+)
+gmm_coefficients = coef(gmm_result)
+summary(gmm_result)
+```
+
+- Holding time and costs constant, changing from taking the bus to driving increases utility by `r pander(gmm_coefficients [["car_intercept"]])`
+- When the cost of an alternative increases by $1, utility increases by `r pander(gmm_coefficients [["cost_coefficient"]])`.
+- When bus time increases by 1 minute, utility increases by `r pander(gmm_coefficients [["bus_time_coefficient"]])`.
+- When drive time increases by 1 minute, utility increases by `r pander(gmm_coefficients[["car_time_coefficient"]])`.
+
+## b
+
+### i
+
+```{r}
+instrument_variables = c(
+    "constant",
+    "price_gas",
+    "snowfall",
+    "construction",
+    "bus_detour"
+)
+
+instrument_estimates = gmm(
+    g = function(parameters, matrix_data) {
+        # when we item-wise multiply a vector by a matrix
+        # r will recycle the vector for each column of the matrix
+        # use residuals from actual model
+        get_residuals(
+            parameters,
+            matrix_data[ , predictor_variables],
+            matrix_data[, outcome_variable]
+        ) *
+        # but now, they shouldn't be correlated with the instruments
+        matrix_data[ , instrument_variables]
+    },
+    x = matrix_data,
+    t0 = parameters,
+    # assume independence
+    vcov = "iid",
+    control = list(
+        # very small relative tolerance
+        reltol = 1e-25,
+        # give up after 10k iterations
+        maxit = 10000
+    )
+)
+
+instrument_coefficients = coef(instrument_estimates)
+
+summary(instrument_estimates)
+```
+
+- Holding time and costs constant, changing from taking the bus to driving increases utility by `r pander(instrument_coefficients[["car_intercept"]])`
+- When the cost of an alternative increases by $1, utility increases by `r pander(instrument_coefficients[["cost_coefficient"]])`.
+- When bus time increases by 1 minute, utility increases by `r pander(instrument_coefficients[["bus_time_coefficient"]])`.
+- When drive time increases by 1 minute, utility increases by `r pander(instrument_coefficients[["car_time_coefficient"]])`.
+
+### ii
+
+```{r}
+overspecified_test = specTest(instrument_estimates)
+```
+
+Because p = `r pander(overspecified_test$test[,"P-value"])` < 0.05, we can't reject the null that there our model isn't overspecified.

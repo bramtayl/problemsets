@@ -1,0 +1,9 @@
+camping.csv variables
+camper_id: individual identifier
+park_id: state park identifier
+park: state park
+visit: binary indicator (0 or 1) for chosen park
+mountain: binary indicator (0 or 1) if park is in the mountains
+beach: binary indicator (0 or 1) if park is on the beach
+cost: cost (in dollars) to drive to and from the state park, park for three days, and camp for two nights
+time: time (in minutes) to drive to and from the state park
